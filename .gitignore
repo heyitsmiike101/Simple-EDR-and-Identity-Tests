@@ -1,0 +1,13 @@
+# Runtime logs (contain plaintext commands + host/user/domain info — keep in sandbox)
+Logs/
+*.log
+
+# Editor / tooling
+.claude/
+.vscode/
+.idea/
+
+# Backups / temp
+*.bak
+*.tmp
+~$*
