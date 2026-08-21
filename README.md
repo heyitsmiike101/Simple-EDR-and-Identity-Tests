@@ -262,3 +262,11 @@ Payloads run via `-EncodedCommand`, so child scripts are **not** written here.
 ```
 
 Removed by the `cleanup` command, or reset by restoring your VM snapshot.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE). Provided "as is", for **authorized**
+detection testing only — you are responsible for using it lawfully and solely on
+systems you own or have explicit permission to test.
