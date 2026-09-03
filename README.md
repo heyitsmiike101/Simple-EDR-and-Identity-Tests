@@ -152,22 +152,30 @@ $chars = $blob.ToCharArray(); [Array]::Reverse($chars)
 
 ## Menu options
 
-| Input          | Action                                   | MITRE ATT&CK        | Elevated |
-|----------------|------------------------------------------|---------------------|----------|
-| `1`            | Download EICAR and write to disk         | T1105               | no       |
-| `2`            | Delete shadow copies                     | T1490               | yes      |
-| `3`            | Disable shadow copy / VSS                | T1490               | yes      |
-| `4`            | List shadow copy / VSS state (read-only) | —                   | yes¹     |
-| `5`            | AD / privileged-group enumeration        | T1069.002 / T1087.002 | no     |
-| `6`            | Local host discovery / recon             | T1082 / T1033 / T1016 / T1057 | no |
-| `7`            | LSASS credential-dump test               | T1003.001           | yes      |
-| `8`            | Persistence: Run key + scheduled task    | T1547.001 / T1053.005 | no     |
-| `9`            | Launch `Invoke-S1IDRTests.ps1` (AD enum / IDR) | T1069 / T1087 / T1558 | no |
-| `10`           | Launch `Verify-IDRConfig.ps1` (read-only health check) | —      | no |
-| `11`           | Launch `Test-ISPMThreats.ps1` — **MODIFIES AD** | T1098 / T1078 | yes |
-| `enableshadow` | Re-enable shadow copy / VSS (undo #3)    | —                   | yes      |
-| `cleanup`      | Remove persistence + delete artifacts    | —                   | no       |
-| `q`            | Quit                                     | —                   | —        |
+| Input          | Action                                   | MITRE ATT&CK        | Detects as | Elevated |
+|----------------|------------------------------------------|---------------------|------------|----------|
+| `1`            | Download EICAR and write to disk         | T1105               | **EDR**    | no       |
+| `2`            | Delete shadow copies                     | T1490               | **EDR**    | yes      |
+| `3`            | Disable shadow copy / VSS                | T1490               | **EDR**    | yes      |
+| `4`            | List shadow copy / VSS state (read-only) | —                   | none (read-only) | yes¹ |
+| `5`            | AD / privileged-group enumeration        | T1069.002 / T1087.002 | **Identity** | no    |
+| `6`            | Local host discovery / recon             | T1082 / T1033 / T1016 / T1057 | **EDR** (low/none) | no |
+| `7`            | LSASS credential-dump test               | T1003.001           | **EDR**    | yes      |
+| `8`            | Persistence: Run key + scheduled task    | T1547.001 / T1053.005 | **EDR**  | no       |
+| `9`            | Launch `Invoke-S1IDRTests.ps1` (AD enum / IDR) | T1069 / T1087 / T1558 | **Identity** | no |
+| `10`           | Launch `Verify-IDRConfig.ps1` (read-only health check) | —      | none (read-only) | no |
+| `11`           | Launch `Test-ISPMThreats.ps1` — **MODIFIES AD** | T1098 / T1078 | **Identity (ISPM)** | yes |
+| `enableshadow` | Re-enable shadow copy / VSS (undo #3)    | —                   | none       | yes      |
+| `cleanup`      | Remove persistence + delete artifacts    | —                   | none       | no       |
+| `q`            | Quit                                     | —                   | —          | —        |
+
+> **Identity vs EDR at a glance.** Options **1, 2, 3, 7, 8** exercise the **EDR /
+> endpoint** engines (Static AI, Behavioral AI, Storyline) and surface on
+> **Sentinels > Threats**. Options **5, 9, 11** exercise the **Identity** stack
+> (Ranger AD / IDR / ISPM) and surface on **Alerts > Identity** (or ISPM). Option
+> **5** is the crossover case: it is fired from the endpoint but is detected by the
+> agent's *endpoint Identity* engine (`ADSecure-EP`), so it lands under Identity,
+> not Threats. The full per-alert breakdown is below.
 
 ¹ `vssadmin list` requires admin, so option 4 elevates even though it only reads state.
 
@@ -198,6 +206,86 @@ confirmation prompt gate execution.
   Option 9 (`Invoke-S1IDRTests.ps1`) already covers the deeper Identity attacks —
   AD enumeration, Kerberoasting / AS-REP / DCSync recon, and BloodHound-style LDAP
   — so those are exercised from that maintained script rather than duplicated here.
+
+---
+
+## Alert types this triggers — Identity vs EDR
+
+This tool deliberately spans **two different SentinelOne detection surfaces**, and
+each option is built to light up one of them. Knowing which surface an action hits
+tells you *where in the console to go look* and *which correlation rules you are
+actually validating*.
+
+- **EDR (endpoint) detections** come from the agent's on-device engines — **Static
+  AI** (pre-execution file scoring), **Behavioral AI / Storyline** (runtime
+  behavior), and reputation/AMSI. They surface under **Sentinels → Threats** as
+  *Malicious* / *Suspicious* threats with a Storyline ID, and are about *what a
+  process did on this host*.
+- **Identity detections** come from the Ranger AD / **IDR** and **ISPM** stack.
+  They surface under **Alerts → Identity** (and **Identity → ISPM → Threat
+  Detection** for posture threats), are tagged with an `ADSecure-*` **Detection
+  Engine**, and are about *who touched Active Directory and how* — enumeration,
+  credential recon, decoy hits, and AD posture changes. On newer agents
+  (≥ 25.2.3) some Identity/deception hits appear only in **Event Search / XDR**
+  (`event.type = 'Behavioral Indicators'`) rather than as classic alerts.
+
+### EDR alerts (endpoint engines → Sentinels → Threats)
+
+| Option | Behavior | Expected EDR detection | Engine / where | Notes |
+|--------|----------|------------------------|----------------|-------|
+| `1` | Write EICAR to disk (T1105) | **Malicious file — EICAR test file** | Static AI (on-write / on-scan) → Threats | Byte-identical EICAR; fires as a normal malware threat, not behavioral. |
+| `2` | `vssadmin`-style shadow copy deletion (T1490) | **Shadow copy / VSS deletion** (ransomware-style inhibit-recovery) | Behavioral AI / Storyline → Threats | High-fidelity behavioral alert; classic ransomware precursor. |
+| `3` | Disable / resize VSS (T1490) | **VSS tampering / service disabled** | Behavioral AI / Storyline → Threats | Same recovery-inhibition family as `2`; may be lower severity. |
+| `6` | Local host discovery — `systeminfo`, `whoami`, `ipconfig`, `tasklist` (T1082/T1033/T1016/T1057) | **Discovery / recon** behavioral indicator (often **low severity or none**) | Behavioral AI / Storyline (indicators) | Individually benign; may only show as Storyline indicators, not a standalone threat. Good for testing correlation, not for a guaranteed alert. |
+| `7` | LSASS credential-dump attempt (T1003.001) | **Credential dumping — LSASS memory access** | Behavioral AI / Storyline → Threats | The **access attempt** fires the detection even when Credential Guard / S1 blocks the actual read and no dump is produced. |
+| `8` | Persistence — HKCU Run key + scheduled task (T1547.001 / T1053.005) | **Persistence — Run key / scheduled task creation** | Behavioral AI / Storyline → Threats | Two indicators (autorun + task). `cleanup` removes both. |
+
+### Identity alerts (IDR / ISPM → Alerts → Identity)
+
+Option `5` is fired from the endpoint menu but is an **Identity** detection —
+the endpoint agent's `ADSecure-EP` engine flags the AD enumeration. Options `9`
+and `11` launch the dedicated Identity scripts, which are the richer sources of
+these alerts.
+
+| Source | Behavior / test | Expected Identity alert | Detection engine |
+|--------|-----------------|-------------------------|------------------|
+| `5`, `9` (Module 1) | `net group "Domain Admins" /domain` and privileged-group enum | **AD Privilege Group Enumeration Detected** | `ADSecure-EP` |
+| `9` (Module 1) | `net group "Domain Computers"` | **AD Domain Computer Enumeration Detected** | `ADSecure-EP` |
+| `9` (Module 1) | `net user /domain` | **Domain Users Enumeration Detected** | `ADSecure-EP` |
+| `9` (Module 1) | `nltest /dclist` / `/dsgetdc` | **Domain Controller Discovery Detected** | `ADSecure-EP` |
+| `9` (Module 1) | `nltest /domain_trusts` | **Domain Trust Discovery Detected \| Nltest Command Usage Detected** | `ADSecure-EP` |
+| `9` (Module 1) | `klist` / Kerberos ticket listing | **Kerberos Ticket Enumeration Detected** | `ADSecure-EP` |
+| `9` (Module 1/5) | `setspn -Q` SPN scan (Kerberoasting recon, T1558) | **SPN Scanning Detected** | `ADSecure-EP` |
+| `9` (Module 1/5) | LDAP / `dsquery` for `admincount=1` | **Critical AD Objects Queried \| Suspicious LDAP Queries Detected** | `ADSecure-EP` |
+| `9` (Module 5) | ACL / DCSync-rights recon | **AD ACL Enumeration \| Critical AD Objects Queried** | `ADSecure-EP` (also **ISPM → Exposures → DCSync**) |
+| `9` (Module 5) | BloodHound-style collection | **BloodHound Usage Detected** | `ADSecure-EP` |
+| `9` (Module 3, DC) | `net group` on DC (SAMR path) | **SAMR AD Privileged User Enumeration** (ISIDP) | `ADSecure-DC-SAMR` |
+| `9` (Module 3, DC) | LDAP privileged-user query | **LDAP AD Privileged User Enumeration** (ISIDP) | `ADSecure-DC-LDAP` |
+| `9` (Module 3, DC) | `Get-ADUser -LDAPFilter (admincount=1)` | **LSARPC AD Privileged User Enumeration** | `ADSecure-DC-LSARPC` |
+| `9` (Module 4) | Remote PowerShell to protected host | **Unauthorized Access Attempt (Remote PowerShell)** | `ADSecure-CA` |
+| `9` (Module 4) | RDP to protected host | **Unauthorized Access Attempt (Remote Desktop)** | `ADSecure-CA` |
+| `9` (Module 2) | Enumeration returning decoy objects | Decoy/deception hit — verify fake objects appear (XDR on ≥ 25.2.3) | Deception layer |
+
+### Identity — ISPM posture threats (option `11` → Identity → ISPM)
+
+Option `11` **modifies AD** (lab only) to trigger real-time **ISPM (Identity
+Security Posture Management)** threat detections. These surface under **Identity →
+ISPM → Threat Detection → Threats** (and also **Alerts → Identity**):
+
+| Test | Action | Expected ISPM threat |
+|------|--------|----------------------|
+| T1 | Password reset from an unusual host (Event 4724) | **Suspicious password change detected** |
+| T2 | Re-enable a disabled privileged account | **Reactivation of disabled privileged accounts** |
+| T3 | Repeated bad LDAP binds (Event 4625) | **Brute-force attack — mass account lockout** |
+| T4 | Use of the built-in Administrator | **Default Admin Account usage** (also **ISPM → Exposures → Weak default Administrator Account**) |
+| T5 | SIDHistory inspection / tampering | **SID history tampering detected** |
+
+### What deliberately does *not* alert
+
+Options `4` and `10` are **read-only** (list VSS state / read IDR config) and are
+not expected to raise a detection — they exist to help you *confirm state and
+correlate timelines*, not to trigger alerts. `enableshadow` and `cleanup` are undo
+actions and are likewise not detections.
 
 ---
 
